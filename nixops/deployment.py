@@ -490,7 +490,7 @@ class Deployment(object):
             # Set system.stateVersion if the Nixpkgs version supports it.
             if nixops.util.parse_nixos_version(defn.config["nixosRelease"]) >= ["15", "09"]:
                 attrs_list.append({
-                    ('system', 'stateVersion'): Call(RawValue("lib.mkDefault"), m.state_version or '14.12')
+                    ('system', 'stateVersion'): Call(RawValue("lib.mkDefault"), m.state_version or defn.config["nixosRelease"])
                 })
 
             if self.nixos_version_suffix:
@@ -636,7 +636,7 @@ class Deployment(object):
         nixops.parallel.run_tasks(
             nr_workers=max_concurrent_copy,
             tasks=self.active.itervalues(), worker_fun=worker)
-        self.logger.log(ansi_success("{0}> closures copied successfully".format(self.name), outfile=self.logger._log_file))
+        self.logger.log(ansi_success("{0}> closures copied successfully".format(self.name or "unnamed"), outfile=self.logger._log_file))
 
 
     def activate_configs(self, configs_path, include, exclude, allow_reboot,
@@ -708,7 +708,7 @@ class Deployment(object):
                 # This thread shouldn't throw an exception because
                 # that will cause NixOps to exit and interrupt
                 # activation on the other machines.
-                m.logger.error(traceback.format_exc() if debug else str(e))
+                m.logger.error(traceback.format_exc())
                 return m.name
             return None
 
@@ -846,16 +846,13 @@ class Deployment(object):
             self._destroy_resources(include=to_destroy)
 
 
-    def _deploy(self, dry_run=False, build_only=False, create_only=False, copy_only=False, evaluate_only=False,
+    def _deploy(self, dry_run=False, build_only=False, create_only=False, copy_only=False,
                 include=[], exclude=[], check=False, kill_obsolete=False,
                 allow_reboot=False, allow_recreate=False, force_reboot=False,
                 max_concurrent_copy=5, sync=True, always_activate=False, repair=False, dry_activate=False):
         """Perform the deployment defined by the deployment specification."""
 
         self.evaluate_active(include, exclude, kill_obsolete)
-
-        if evaluate_only:
-            return
 
         # Assign each resource an index if it doesn't have one.
         for r in self.active_resources.itervalues():
@@ -944,7 +941,7 @@ class Deployment(object):
                                 r.warn("cannot determine NixOS version")
 
                         r.wait_for_ssh(check=check)
-                        r.generate_vpn_key(check=check)
+                        r.generate_vpn_key()
 
                 except:
                     r._errored = True
@@ -957,15 +954,11 @@ class Deployment(object):
         if create_only: return
 
         # Build the machine configurations.
-        if dry_run:
-            self.build_configs(dry_run=dry_run, repair=repair, include=include, exclude=exclude)
-            return
-
         # Record configs_path in the state so that the ‘info’ command
         # can show whether machines have an outdated configuration.
-        self.configs_path = self.build_configs(repair=repair, include=include, exclude=exclude)
+        self.configs_path = self.build_configs(dry_run=dry_run, repair=repair, include=include, exclude=exclude)
 
-        if build_only: return
+        if build_only or dry_run: return
 
         # Copy the closures of the machine configurations to the
         # target machines.
@@ -991,7 +984,7 @@ class Deployment(object):
             r.after_activation(self.definitions[r.name])
 
         nixops.parallel.run_tasks(nr_workers=-1, tasks=self.active_resources.itervalues(), worker_fun=cleanup_worker)
-        self.logger.log(ansi_success("{0}> deployment finished successfully".format(self.name), outfile=self.logger._log_file))
+        self.logger.log(ansi_success("{0}> deployment finished successfully".format(self.name or "unnamed"), outfile=self.logger._log_file))
 
     def deploy(self, **kwargs):
         with self._get_deployment_lock():

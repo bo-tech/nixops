@@ -202,7 +202,7 @@ class EC2State(MachineState, nixops.resources.ec2_common.EC2CommonState):
             ],
             ('deployment', 'ec2', 'blockDeviceMapping'): block_device_mapping,
             ('deployment', 'ec2', 'instanceId'): self.vm_id,
-            ('ec2', 'hvm'): self.virtualization_type == "hvm",
+            ('ec2', 'hvm'): self.virtualization_type == "hvm" or self.virtualization_type is None,
         }
 
     def get_physical_backup_spec(self, backupid):
@@ -225,7 +225,8 @@ class EC2State(MachineState, nixops.resources.ec2_common.EC2CommonState):
         # make the old way of defining keys work.
         for k, v in self.block_device_mapping.items():
             if v.get('encrypt', False) and v.get('passphrase', "") == "" and v.get('generatedKey', "") != "" and v.get('encryptionType', "luks") == "luks":
-                keys["luks-" + _sd_to_xvd(k).replace('/dev/', '')] = { 'text': v['generatedKey'], 'group': 'root', 'permissions': '0600', 'user': 'root'}
+                key_name = "luks-" + _sd_to_xvd(k).replace('/dev/', '')
+                keys[key_name] = { 'text': v['generatedKey'], 'keyFile': '/run/keys/' + key_name, 'destDir': '/run/keys', 'group': 'root', 'permissions': '0600', 'user': 'root'}
         return keys
 
 
@@ -653,7 +654,7 @@ class EC2State(MachineState, nixops.resources.ec2_common.EC2CommonState):
 
                 if defn.spot_instance_timeout:
                     common_args['valid_until'] = \
-                        (datetime.datetime.now() +
+                        (datetime.datetime.utcnow() +
                          datetime.timedelta(0, defn.spot_instance_timeout)).isoformat()
 
                 # FIXME: Should use a client token here, but
@@ -783,7 +784,7 @@ class EC2State(MachineState, nixops.resources.ec2_common.EC2CommonState):
         if self.region is None:
             self.region = defn.region
         elif self.region != defn.region:
-            self.warn("cannot change region of a running instance")
+            self.warn("cannot change region of a running instance (from ‘{}‘ to ‘{}‘)".format(self.region, defn.region))
         self.connect()
 
         # Stop the instance (if allowed) to change instance attributes
@@ -931,11 +932,11 @@ class EC2State(MachineState, nixops.resources.ec2_common.EC2CommonState):
 
         # Warn about some EC2 options that we cannot update for an existing instance.
         if self.instance_type != defn.instance_type:
-            self.warn("cannot change type of a running instance (use ‘--allow-reboot’)")
+            self.warn("cannot change type of a running instance (from ‘{0}‘ to ‘{1}‘): use ‘--allow-reboot’".format(self.instance_type, defn.instance_type))
         if self.ebs_optimized and self.ebs_optimized != defn.ebs_optimized:
-            self.warn("cannot change ebs optimized attribute of a running instance (use ‘--allow-reboot’)")
+            self.warn("cannot change ebs optimized attribute of a running instance: use ‘--allow-reboot’")
         if defn.zone and self.zone != defn.zone:
-            self.warn("cannot change availability zone of a running instance")
+            self.warn("cannot change availability zone of a running (from ‘{0}‘ to ‘{1}‘)".format(self.zone, defn.zone))
         if set(defn.security_groups) != set(self.security_groups):
             self.warn(
                 'cannot change security groups of an existing instance (from [{0}] to [{1}])'.format(

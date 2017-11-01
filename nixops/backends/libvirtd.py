@@ -4,11 +4,13 @@ from distutils import spawn
 import os
 import copy
 import random
+import shutil
 import string
 import subprocess
 import time
 
 from nixops.backends import MachineDefinition, MachineState
+import nixops.known_hosts
 import nixops.util
 
 
@@ -31,6 +33,7 @@ class LibvirtdDefinition(MachineDefinition):
         self.headless = x.find("attr[@name='headless']/bool").get("value") == 'true'
         self.image_dir = x.find("attr[@name='imageDir']/string").get("value")
         assert self.image_dir is not None
+        self.domain_type = x.find("attr[@name='domainType']/string").get("value")
 
         self.networks = [
             k.get("value")
@@ -62,6 +65,14 @@ class LibvirtdState(MachineState):
         super_flags = super(LibvirtdState, self).get_ssh_flags(*args, **kwargs)
         return super_flags + ["-o", "StrictHostKeyChecking=no",
                               "-i", self.get_ssh_private_key_file()]
+
+    def get_physical_spec(self):
+        return {('users', 'extraUsers', 'root', 'openssh', 'authorizedKeys', 'keys'): [self.client_public_key]}
+
+    def address_to(self, m):
+        if isinstance(m, LibvirtdState):
+            return m.private_ipv4
+        return MachineState.address_to(self, m)
 
     def _vm_id(self):
         return "nixops-{0}-{1}".format(self.depl.uuid, self.name)
@@ -98,11 +109,18 @@ class LibvirtdState(MachineState):
                 raise Exception('{} is not writable by this user or it does not exist'.format(defn.image_dir))
 
             self.disk_path = self._disk_path(defn)
-            self._logged_exec(["qemu-img", "create", "-f", "qcow2", "-b",
-                               base_image + "/disk.qcow2", self.disk_path])
-            # TODO: use libvirtd.extraConfig to make the image accessible for your user
-            os.chmod(self.disk_path, 0666)
+            shutil.copyfile(base_image + "/disk.qcow2", self.disk_path)
+            # Rebase onto empty backing file to prevent breaking the disk image
+            # when the backing file gets garbage collected.
+            self._logged_exec(["qemu-img", "rebase", "-f", "qcow2", "-b",
+                               "", self.disk_path])
+            os.chmod(self.disk_path, 0660)
             self.vm_id = self._vm_id()
+            dom_file = self.depl.tempdir + "/{0}-domain.xml".format(self.name)
+            nixops.util.write_file(dom_file, self.domain_xml)
+            # By using "virsh define" we ensure that the domain is
+            # "persistent", as opposed to "transient" (removed on reboot).
+            self._logged_exec(["virsh", "-c", "qemu:///system", "define", dom_file])
         self.start()
         return True
 
@@ -129,7 +147,7 @@ class LibvirtdState(MachineState):
             ]).format(n)
 
         domain_fmt = "\n".join([
-            '<domain type="kvm">',
+            '<domain type="{5}">',
             '  <name>{0}</name>',
             '  <memory unit="MiB">{1}</memory>',
             '  <vcpu>{4}</vcpu>',
@@ -158,7 +176,8 @@ class LibvirtdState(MachineState):
             defn.memory_size,
             qemu,
             self._disk_path(defn),
-            defn.vcpu
+            defn.vcpu,
+            defn.domain_type
         )
 
     def _parse_ip(self):
@@ -203,9 +222,7 @@ class LibvirtdState(MachineState):
             self.private_ipv4 = self._parse_ip()
         else:
             self.log("starting...")
-            dom_file = self.depl.tempdir + "/{0}-domain.xml".format(self.name)
-            nixops.util.write_file(dom_file, self.domain_xml)
-            self._logged_exec(["virsh", "-c", "qemu:///system", "create", dom_file])
+            self._logged_exec(["virsh", "-c", "qemu:///system", "start", self.vm_id])
             self._wait_for_ip(0)
 
     def get_ssh_name(self):
@@ -219,12 +236,14 @@ class LibvirtdState(MachineState):
             self._logged_exec(["virsh", "-c", "qemu:///system", "destroy", self.vm_id])
         else:
             self.log("not running")
+        self.state = self.STOPPED
 
     def destroy(self, wipe=False):
         if not self.vm_id:
             return True
         self.log_start("destroying... ")
         self.stop()
+        self._logged_exec(["virsh", "-c", "qemu:///system", "undefine", self.vm_id])
         if (self.disk_path and os.path.exists(self.disk_path)):
             os.unlink(self.disk_path)
         return True
