@@ -122,7 +122,7 @@ class ContainerState(MachineState):
         if host and host.startswith("__machine-"):
             return {self.depl.get_machine(host[10:])}
         else:
-            return {}
+            return set()
 
     def create(self, defn, check, allow_reboot, allow_recreate):
         assert isinstance(defn, ContainerDefinition)
